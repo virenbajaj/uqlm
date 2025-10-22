@@ -12,19 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import os
 from typing import List, Optional
 from rich.progress import Progress
 from uqlm.utils.response_generator import ResponseGenerator
 from uqlm.utils.prompts.factscore_prompts import FACTSCORE_SYSTEM_PROMPT, SUBJECTIVE_SYSTEM_PROMPT
+from uqlm.longform.benchmark.retrieval import DocDB, Retrieval
 
 
 class FactScoreGrader:
-    def __init__(self, llm, max_calls_per_min: int = None):
+    def __init__(self, llm, 
+            max_calls_per_min: int = None, 
+            retrieve: bool = True, 
+            batch_size: int = 256, 
+            data_dir: str = ".cache/factscore",
+            model_dir: str = ".cache/factscore",#TODO: do we need this?
+            cache_dir: str = ".cache/factscore"):
         self.rg = ResponseGenerator(llm, max_calls_per_min=max_calls_per_min)
         self.grader_system_prompt = FACTSCORE_SYSTEM_PROMPT
         self.subjective_system_prompt = SUBJECTIVE_SYSTEM_PROMPT
+        self.retrieve = retrieve
+        self.db = {}
+        self.retrieval = {}
+        self.batch_size = batch_size # batch size for retrieval
+        self.data_dir = data_dir
+        self.cache_dir = cache_dir
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        
+    def register_knowledge_source(self, name="factscore", db_path=None, data_path=None):
+        assert name not in self.retrieval, f"{name} already registered"
+        if db_path is None:
+            db_path = os.path.join(self.data_dir, f"{name}.db")
 
+        if data_path is None:
+            data_path = os.path.join(self.data_dir, f"{name}.jsonl")
+
+        cache_path = os.path.join(self.cache_dir, f"retrieval-{name}.json")
+        embed_cache_path = os.path.join(self.cache_dir, f"retrieval-{name}.pkl")
+
+        self.db[name] = DocDB(db_path=db_path, data_path=data_path)
+        self.retrieval[name] = Retrieval(self.db[name], cache_path, embed_cache_path, batch_size=self.batch_size)
+    
     def construct_entailment_prompt(self, claim: str, answer: str) -> str:
         return f"""
             Context: {answer}
