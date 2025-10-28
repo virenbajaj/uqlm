@@ -24,7 +24,8 @@ class FactScoreGrader:
     def __init__(self, llm, 
             max_calls_per_min: int = None, 
             retrieve: bool = True, 
-            batch_size: int = 256, 
+            batch_size: int = 256,
+            retrieval_type: str = "gtr-t5-large", # "gtr-t5-large" or "bm25"
             data_dir: str = ".cache/factscore",
             model_dir: str = ".cache/factscore",#TODO: do we need this?
             cache_dir: str = ".cache/factscore"):
@@ -41,6 +42,7 @@ class FactScoreGrader:
             os.makedirs(cache_dir)
         
     def register_knowledge_source(self, name="factscore", db_path=None, data_path=None):
+        print(f"Registering knowledge source: {name}")
         assert name not in self.retrieval, f"{name} already registered"
         if db_path is None:
             db_path = os.path.join(self.data_dir, f"{name}.db")
@@ -50,6 +52,10 @@ class FactScoreGrader:
 
         cache_path = os.path.join(self.cache_dir, f"retrieval-{name}.json")
         embed_cache_path = os.path.join(self.cache_dir, f"retrieval-{name}.pkl")
+
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
         self.db[name] = DocDB(db_path=db_path, data_path=data_path)
         self.retrieval[name] = Retrieval(self.db[name], cache_path, embed_cache_path, batch_size=self.batch_size)
@@ -69,19 +75,41 @@ class FactScoreGrader:
             Answer only subjective or objective:
             """
 
-    async def grade_claims(self, claim_sets: List[List[str]], answers: List[str], progress_bar: Optional[Progress] = None) -> List[List[bool]]:
+    async def grade_claims(self, claim_sets: List[List[str]], entities: List[str], answers: List[str], progress_bar: Optional[Progress] = None, knowledge_source: str = "factscore") -> List[List[bool]]:
+        if knowledge_source not in self.retrieval:
+            self.register_knowledge_source(knowledge_source)
         prompts = []
         indices = []
-        for i, (claim_set, answer) in enumerate(zip(claim_sets, answers)):
+        for i, (entity, claim_set, answer) in enumerate(zip(entities, claim_sets, answers)):
             for j, claim in enumerate(claim_set):
-                prompt = self.construct_entailment_prompt(claim=claim, answer=answer)
+                if self.retrieve:
+                    passages = self.retrieval[knowledge_source].get_passages(entity, claim, k=5)
+                    # print(f"Retrieved {len(passages)} passages for entity {entity} and claim {claim}")
+                    # print(f"Passages:\n{passages}")
+                    context = ""
+                    for psg_idx, psg in enumerate(reversed(passages)):
+                        context += "Title: {}\nText: {}\n\n".format(psg["title"], psg["text"].replace("<s>", "").replace("</s>", ""))
+                    # print(f"Context length: {len(context)} | Answer length: {len(answer)}")
+                    prompt = self.construct_entailment_prompt(claim=claim, answer=context)
+                    # print(f"Prompt:{prompt}\n")
+                else:
+                    prompt = self.construct_entailment_prompt(claim=claim, answer=answer)
                 prompts.append(prompt)
                 indices.append((i, j))
 
-        generations = await self.rg.generate_responses(prompts=prompts, system_prompt=self.grader_system_prompt, progress_bar=progress_bar)
+        try:
+            generations = await self.rg.generate_responses(prompts=prompts, system_prompt=self.grader_system_prompt, progress_bar=progress_bar)
+        except Exception:
+            if progress_bar:
+                try:
+                    progress_bar.stop()
+                except Exception:
+                    pass
+            raise
         responses = generations["data"]["response"]
+        print(f"responses: {responses}")
         formatted_grade_lists = self._format_outputs(flat_grades_list=responses, reference_structure=claim_sets)
-        return formatted_grade_lists
+        return formatted_grade_lists, prompts
     
     async def evaluate_claim_objectivity(self, claim_sets: List[List[str]], progress_bar: Optional[Progress] = None) -> List[List[bool]]:
         prompts = []
@@ -92,7 +120,15 @@ class FactScoreGrader:
                 prompts.append(prompt)
                 indices.append((i, j))
 
-        self.generations = await self.rg.generate_responses(prompts=prompts, system_prompt=self.subjective_system_prompt, progress_bar=progress_bar)
+        try:
+            self.generations = await self.rg.generate_responses(prompts=prompts, system_prompt=self.subjective_system_prompt, progress_bar=progress_bar)
+        except Exception:
+            if progress_bar:
+                try:
+                    progress_bar.stop()
+                except Exception:
+                    pass
+            raise
         self.responses = self.generations["data"]["response"]
         formatted_grade_lists = self._format_outputs(flat_grades_list=self.responses, reference_structure=claim_sets, strings_to_check=["objective", "subjective"])
         return formatted_grade_lists    

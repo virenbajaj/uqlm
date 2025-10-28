@@ -30,6 +30,7 @@ class DocDB(object):
             self.build_db(self.db_path, data_path)
 
     def __enter__(self):
+        self._ensure_connection()
         return self
 
     def __exit__(self, *args):
@@ -37,11 +38,23 @@ class DocDB(object):
 
     def path(self):
         """Return the path to the file that backs this database."""
-        return self.path
+        return self.db_path
 
     def close(self):
         """Close the connection to the database."""
         self.connection.close()
+        self.connection = None
+
+    def _ensure_connection(self):
+        """Ensure there is an open sqlite3 connection; reopen if closed."""
+        if self.connection is None:
+            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            return
+        try:
+            # This will raise ProgrammingError if the connection is closed
+            self.connection.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
 
     def build_db(self, db_path, data_path):
         from transformers import RobertaTokenizer
@@ -57,6 +70,7 @@ class DocDB(object):
         with open(data_path, "r") as f:
             for line in f:
                 dp = json.loads(line)
+                # print(f"dp: {dp}")
                 title = dp["title"]
                 text = dp["text"]
                 if title in titles:
@@ -86,17 +100,17 @@ class DocDB(object):
                 if len(output_lines) == 1000000:
                     c.executemany("INSERT INTO documents VALUES (?,?)", output_lines)
                     output_lines = []
-                    print ("Finish saving %dM documents (%dmin)" % (tot / 1000000, (time.time()-start_time)/60))
+                    print ("Finish saving %d documents (%d seconds)" % (tot, (time.time()-start_time)))
 
         if len(output_lines) > 0:
             c.executemany("INSERT INTO documents VALUES (?,?)", output_lines)
-            print ("Finish saving %dM documents (%dmin)" % (tot / 1000000, (time.time()-start_time)/60))
+            print ("Finish saving %d documents (%d seconds)" % (tot, (time.time()-start_time)))
 
         self.connection.commit()
-        self.connection.close()
 
     def get_text_from_title(self, title):
         """Fetch the raw text of the doc for 'doc_id'."""
+        self._ensure_connection()
         cursor = self.connection.cursor()
         cursor.execute("SELECT text FROM documents WHERE title = ?", (title,))
         results = cursor.fetchall()
@@ -119,14 +133,17 @@ class Retrieval(object):
         assert retrieval_type=="bm25" or retrieval_type.startswith("gtr-")
         
         self.encoder = None
+        self.device = None
         self.load_cache()
         self.add_n = 0
         self.add_n_embed = 0
 
     def load_encoder(self):
         from sentence_transformers import SentenceTransformer
+        import torch
         encoder = SentenceTransformer("sentence-transformers/" + self.retrieval_type)
-        encoder = encoder.cuda()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        encoder = encoder.to(self.device)
         encoder = encoder.eval()
         self.encoder = encoder
         assert self.batch_size is not None
@@ -180,14 +197,15 @@ class Retrieval(object):
             passage_vectors = self.embed_cache[topic]
         else:
             inputs = [psg["title"] + " " + psg["text"].replace("<s>", "").replace("</s>", "") for psg in passages]
-            passage_vectors = self.encoder.encode(inputs, batch_size=self.batch_size, device=self.encoder.device)
+            passage_vectors = self.encoder.encode(inputs, batch_size=self.batch_size, device=self.device)
             self.embed_cache[topic] = passage_vectors
             self.add_n_embed += 1
         query_vectors = self.encoder.encode([retrieval_query], 
                                             batch_size=self.batch_size,
-                                            device=self.encoder.device)[0]
+                                            device=self.device)[0]
         scores = np.inner(query_vectors, passage_vectors)
         indices = np.argsort(-scores)[:k]
+        # print(f"Scores for selected indices: {[scores[i] for i in indices]}")
         return [passages[i] for i in indices]
 
     def get_passages(self, topic, question, k):
@@ -195,7 +213,8 @@ class Retrieval(object):
         cache_key = topic + "#" + retrieval_query
         
         if cache_key not in self.cache:
-            passages = self.db.get_text_from_title(topic)
+            # print(f"Retrieval type: {self.retrieval_type}")
+            passages = self.db.get_text_from_title(topic) #retrieved text for the topic
             if self.retrieval_type=="bm25":
                 self.cache[cache_key] = self.get_bm25_passages(topic, retrieval_query, passages, k)
             else:
