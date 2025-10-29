@@ -108,8 +108,9 @@ class FactScoreGrader:
             raise
         responses = generations["data"]["response"]
         print(f"responses: {responses}")
-        formatted_grade_lists = self._format_outputs(flat_grades_list=responses, reference_structure=claim_sets)
-        return formatted_grade_lists, prompts
+        formatted_grade_lists = self._format_outputs(flat_grades_list=responses, reference_structure=claim_sets, strings_to_check=["yes", "no"])
+        formatted_prompt_lists = self._format_outputs(flat_grades_list=prompts, reference_structure=claim_sets, strings_to_check=None)
+        return formatted_grade_lists, formatted_prompt_lists
     
     async def evaluate_claim_objectivity(self, claim_sets: List[List[str]], progress_bar: Optional[Progress] = None) -> List[List[bool]]:
         prompts = []
@@ -143,7 +144,7 @@ class FactScoreGrader:
         else:
             return False
 
-    def _format_outputs(self, flat_grades_list: List[str], reference_structure: List[List[str]], strings_to_check: List[str] = ["yes", "no"]) -> List[bool]:
+    def _format_outputs(self, flat_grades_list: List[str], reference_structure: List[List[str]], strings_to_check: List[str] | None) -> List[bool]:
         """
         Reshape a flat list into a nested list structure that matches the reference structure.
 
@@ -159,7 +160,8 @@ class FactScoreGrader:
         for inner_list in reference_structure:
             inner_length = len(inner_list)
             new_inner_list = flat_grades_list[flat_index : flat_index + inner_length]
-            new_inner_list_bool = [self._str_to_bool(r, strings_to_check=strings_to_check) for r in new_inner_list]
-            formatted_grades.append(new_inner_list_bool)
+            if strings_to_check is not None:
+                new_inner_list = [self._str_to_bool(r, strings_to_check=strings_to_check) for r in new_inner_list]
+            formatted_grades.append(new_inner_list)
             flat_index += inner_length
         return formatted_grades
